@@ -50,7 +50,7 @@ async function run() {
       }
     });
 
-   
+
     // DASHBOARD STATS ENDPOINT
     // GET /dashboard/stats?email=user@example.com&userId=123
     app.get('/dashboard/stats', async (req, res) => {
@@ -160,6 +160,30 @@ async function run() {
       }
     });
 
+
+    /**
+ * @route   GET /dashboard/lessons/user/:userId
+ * @desc    Fetch all lessons created by a specific user ID or Email
+ */
+    app.get('/dashboard/lessons/user/:userId', async (req, res) => {
+      try {
+        const { userId } = req.params;
+
+        // Search by creator.userId or creator.email in case lessons store either identifier
+        const userLessons = await lessonsCollection.find({
+          $or: [
+            { 'creator.userId': userId },
+            { 'creator.email': userId }
+          ]
+        }).sort({ createdAt: -1 }).toArray();
+
+        res.json(userLessons);
+      } catch (error) {
+        console.error('Error fetching creator lessons:', error);
+        res.status(500).json({ error: 'Failed to fetch creator lessons' });
+      }
+    });
+
     // PATCH: Remove from favorites
     app.patch('/dashboard/my-favorites/remove', async (req, res) => {
       try {
@@ -180,6 +204,112 @@ async function run() {
       } catch (error) {
         console.error('Error removing favorite:', error);
         res.status(500).json({ message: 'Failed to remove favorite' });
+      }
+    });
+
+    // ==========================================
+    // 💬 COMMENTS ROUTES
+    // ==========================================
+
+    /**
+     * @route   POST /dashboard/lessons/:id/comments
+     * @desc    Add a comment to a lesson
+     */
+    app.post('/dashboard/lessons/:id/comments', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { text, userEmail, userName, userImage } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: 'Invalid lesson ID' });
+        }
+
+        const newComment = {
+          _id: new ObjectId(),
+          text,
+          userEmail,
+          userName,
+          userImage,
+          createdAt: new Date().toISOString()
+        };
+
+        const result = await lessonsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $push: { comments: newComment },
+            $inc: { commentsCount: 1 }
+          }
+        );
+
+        res.status(201).json({ success: true, comment: newComment });
+      } catch (error) {
+        console.error('Error adding comment:', error);
+        res.status(500).json({ error: 'Failed to add comment' });
+      }
+    });
+
+    /**
+     * @route   GET /dashboard/lessons/:id/comments
+     * @desc    Get all comments for a specific lesson
+     */
+    app.get('/dashboard/lessons/:id/comments', async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: 'Invalid lesson ID' });
+        }
+
+        const lesson = await lessonsCollection.findOne(
+          { _id: new ObjectId(id) },
+          { projection: { comments: 1 } }
+        );
+
+        res.json(lesson?.comments || []);
+      } catch (error) {
+        console.error('Error fetching comments:', error);
+        res.status(500).json({ error: 'Failed to fetch comments' });
+      }
+    });
+
+    // ==========================================
+    // 👍 LIKES ROUTES
+    // ==========================================
+
+    /**
+     * @route   PATCH /dashboard/lessons/:id/like
+     * @desc    Toggle like status (Like / Unlike) on a lesson
+     */
+    app.patch('/dashboard/lessons/:id/like', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { userId, email } = req.body;
+        const userIdentifier = userId || email;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: 'Invalid lesson ID' });
+        }
+
+        const lesson = await lessonsCollection.findOne({ _id: new ObjectId(id) });
+        if (!lesson) {
+          return res.status(404).json({ error: 'Lesson not found' });
+        }
+
+        const isLiked = lesson.likedBy && lesson.likedBy.includes(userIdentifier);
+
+        const updateQuery = isLiked
+          ? { $pull: { likedBy: userIdentifier }, $inc: { likesCount: -1 } }
+          : { $addToSet: { likedBy: userIdentifier }, $inc: { likesCount: 1 } };
+
+        await lessonsCollection.updateOne({ _id: new ObjectId(id) }, updateQuery);
+
+        res.status(200).json({
+          success: true,
+          isLiked: !isLiked,
+          message: !isLiked ? 'Lesson liked' : 'Lesson unliked'
+        });
+      } catch (error) {
+        console.error('Error toggling like:', error);
+        res.status(500).json({ error: 'Failed to update like status' });
       }
     });
 
