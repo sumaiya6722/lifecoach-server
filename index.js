@@ -226,14 +226,14 @@ async function run() {
 
         const newComment = {
           _id: new ObjectId(),
-          text,
-          userEmail,
-          userName,
-          userImage,
+          text: text || '',
+          userEmail: userEmail || 'Anonymous',
+          userName: userName || 'Anonymous User',
+          userImage: userImage || '',
           createdAt: new Date().toISOString()
         };
 
-        const result = await lessonsCollection.updateOne(
+        await lessonsCollection.updateOne(
           { _id: new ObjectId(id) },
           {
             $push: { comments: newComment },
@@ -241,10 +241,49 @@ async function run() {
           }
         );
 
+        // Explicitly return the newComment object inside response
         res.status(201).json({ success: true, comment: newComment });
       } catch (error) {
         console.error('Error adding comment:', error);
         res.status(500).json({ error: 'Failed to add comment' });
+      }
+    });
+
+    /**
+ * @route   POST /dashboard/lessons/:id/report
+ * @desc    Report a lesson and increment total report count
+ */
+    app.post('/dashboard/lessons/:id/report', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { userId, email, reason } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: 'Invalid lesson ID' });
+        }
+
+        const reportEntry = {
+          _id: new ObjectId(),
+          reportedBy: userId || email || 'Anonymous',
+          email: email || '',
+          reason: reason || 'Inappropriate Content',
+          createdAt: new Date().toISOString()
+        };
+
+        // Store individual report AND increment overall reportsCount counter
+        await lessonsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $push: { reports: reportEntry },
+            $inc: { reportsCount: 1 },
+            $set: { isReported: true }
+          }
+        );
+
+        res.status(200).json({ success: true, message: 'Report submitted successfully' });
+      } catch (error) {
+        console.error('Error reporting lesson:', error);
+        res.status(500).json({ error: 'Failed to submit report' });
       }
     });
 
