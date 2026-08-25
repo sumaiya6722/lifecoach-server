@@ -161,6 +161,254 @@ async function run() {
     });
 
 
+//////Manage User ///////////////////////
+    /**
+ * @route   GET /admin/lessons
+ * @desc    Fetch all lessons with filtering & overall admin stats
+ */
+    app.get('/admin/lessons', async (req, res) => {
+      try {
+        const { category, visibility, flagged } = req.query;
+
+        // Build Mongo Query Filter
+        const filter = {};
+
+        if (category && category !== 'All') {
+          filter.category = category;
+        }
+
+        if (visibility && visibility !== 'All') {
+          filter.accessLevel = visibility; // e.g., 'Public', 'Private', 'Premium'
+        }
+
+        if (flagged === 'true') {
+          filter.$or = [{ isReported: true }, { reportsCount: { $gt: 0 } }];
+        }
+
+        // Fetch filtered lessons
+        const lessons = await lessonsCollection.find(filter).sort({ createdAt: -1 }).toArray();
+
+        // Fetch overall counts for header stats
+        const publicCount = await lessonsCollection.countDocuments({ accessLevel: 'Public' });
+        const privateCount = await lessonsCollection.countDocuments({ accessLevel: 'Private' });
+        const flaggedCount = await lessonsCollection.countDocuments({
+          $or: [{ isReported: true }, { reportsCount: { $gt: 0 } }]
+        });
+
+        res.status(200).json({
+          lessons,
+          stats: {
+            publicCount,
+            privateCount,
+            flaggedCount
+          }
+        });
+      } catch (error) {
+        console.error('Error fetching admin lessons:', error);
+        res.status(500).json({ error: 'Failed to fetch lessons' });
+      }
+    });
+
+    /**
+     * @route   PATCH /admin/lessons/:id/featured
+     * @desc    Toggle featured status of a lesson
+     */
+    app.patch('/admin/lessons/:id/featured', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { isFeatured } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: 'Invalid lesson ID' });
+        }
+
+        await lessonsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { isFeatured: Boolean(isFeatured) } }
+        );
+
+        res.status(200).json({ success: true, isFeatured: Boolean(isFeatured) });
+      } catch (error) {
+        console.error('Error updating featured status:', error);
+        res.status(500).json({ error: 'Failed to update featured status' });
+      }
+    });
+
+    /**
+     * @route   PATCH /admin/lessons/:id/reviewed
+     * @desc    Mark reported content as reviewed (clears flags)
+     */
+    app.patch('/admin/lessons/:id/reviewed', async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: 'Invalid lesson ID' });
+        }
+
+        await lessonsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: { isReported: false, isReviewed: true },
+            $unset: { reports: "" }
+          }
+        );
+
+        res.status(200).json({ success: true, message: 'Lesson marked as reviewed' });
+      } catch (error) {
+        console.error('Error marking lesson as reviewed:', error);
+        res.status(500).json({ error: 'Failed to update review status' });
+      }
+    });
+
+    /**
+     * @route   DELETE /admin/lessons/:id
+     * @desc    Delete an inappropriate lesson
+     */
+    app.delete('/admin/lessons/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: 'Invalid lesson ID' });
+        }
+
+        const result = await lessonsCollection.deleteOne({ _id: new ObjectId(id) });
+
+        if (result.deletedCount === 0) {
+          return res.status(404).json({ error: 'Lesson not found' });
+        }
+
+        res.status(200).json({ success: true, message: 'Lesson deleted successfully' });
+      } catch (error) {
+        console.error('Error deleting lesson:', error);
+        res.status(500).json({ error: 'Failed to delete lesson' });
+      }
+    });
+///////////////manage user///////////////
+
+
+    /**
+ * @route   GET /homepage/top-contributors-week
+ * @desc    Fetch Top Contributors of the Week (last 7 days)
+ */
+    app.get('/homepage/top-contributors-week', async (req, res) => {
+      try {
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+        const contributors = await lessonsCollection.aggregate([
+          {
+            $match: {
+              createdAt: { $gte: sevenDaysAgo.toISOString() }
+            }
+          },
+          {
+            $group: {
+              _id: "$creator.email",
+              name: { $first: "$creator.name" },
+              photoURL: { $first: "$creator.photoURL" },
+              userId: { $first: "$creator.userId" },
+              recentLessonsCount: { $sum: 1 }
+            }
+          },
+          { $sort: { recentLessonsCount: -1 } },
+          { $limit: 4 }
+        ]).toArray();
+
+        res.status(200).json(contributors);
+      } catch (error) {
+        console.error('Error fetching weekly top contributors:', error);
+        res.status(500).json({ error: 'Failed to fetch weekly contributors' });
+      }
+    });
+
+    /**
+     * @route   GET /homepage/most-saved-lessons
+     * @desc    Fetch top lessons sorted by favorites count
+     */
+    app.get('/homepage/most-saved-lessons', async (req, res) => {
+      try {
+        const lessons = await lessonsCollection.find({})
+          .sort({ favoritesCount: -1 })
+          .limit(6)
+          .toArray();
+
+        res.status(200).json(lessons);
+      } catch (error) {
+        console.error('Error fetching most saved lessons:', error);
+        res.status(500).json({ error: 'Failed to fetch most saved lessons' });
+      }
+    });
+
+    /**
+ * @route   GET /admin/stats
+ * @desc    Fetch platform-wide analytics for admin dashboard
+ */
+    app.get('/admin/stats', async (req, res) => {
+      try {
+        // 1. Core Platform Counts
+        const totalUsers = await usersCollection.countDocuments();
+        const totalPublicLessons = await lessonsCollection.countDocuments({
+          accessLevel: { $ne: 'Premium' }
+        });
+
+        // Lessons flagged by report count or isReported status
+        const totalReportedLessons = await lessonsCollection.countDocuments({
+          $or: [{ isReported: true }, { reportsCount: { $gt: 0 } }]
+        });
+
+        // 2. Today's New Lessons
+        const startOfToday = new Date();
+        startOfToday.setHours(0, 0, 0, 0);
+
+        const todaysNewLessons = await lessonsCollection.countDocuments({
+          createdAt: { $gte: startOfToday.toISOString() }
+        });
+
+        // 3. Most Active Contributors (Top 5 users by created lessons)
+        const mostActiveContributors = await lessonsCollection.aggregate([
+          {
+            $group: {
+              _id: "$creator.email",
+              name: { $first: "$creator.name" },
+              photoURL: { $first: "$creator.photoURL" },
+              lessonCount: { $sum: 1 }
+            }
+          },
+          { $sort: { lessonCount: -1 } },
+          { $limit: 5 }
+        ]).toArray();
+
+        // 4. Monthly Lesson & User Growth Data (Simulated Aggregation for Charts)
+        const lessonGrowth = await lessonsCollection.aggregate([
+          {
+            $group: {
+              _id: { $substr: ["$createdAt", 0, 7] }, // Group by YYYY-MM
+              count: { $sum: 1 }
+            }
+          },
+          { $sort: { "_id": 1 } },
+          { $limit: 6 }
+        ]).toArray();
+
+        res.status(200).json({
+          totalUsers,
+          totalPublicLessons,
+          totalReportedLessons,
+          todaysNewLessons,
+          mostActiveContributors,
+          growthData: {
+            lessonGrowth: lessonGrowth.map(item => ({ month: item._id, count: item.count }))
+          }
+        });
+
+      } catch (error) {
+        console.error('Error fetching admin stats:', error);
+        res.status(500).json({ error: 'Failed to retrieve admin stats' });
+      }
+    });
+
     /**
  * @route   GET /dashboard/lessons/user/:userId
  * @desc    Fetch all lessons created by a specific user ID or Email
@@ -206,6 +454,109 @@ async function run() {
         res.status(500).json({ message: 'Failed to remove favorite' });
       }
     });
+
+
+
+    /**
+ * @route   GET /admin/users
+ * @desc    Fetch all users with their total created lessons count
+ */
+    app.get('/admin/users', async (req, res) => {
+      try {
+        const users = await usersCollection.aggregate([
+          {
+            $lookup: {
+              from: 'lessons',
+              let: { userEmail: '$email', userId: { $toString: '$_id' } },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $or: [
+                        { $eq: ['$creator.email', '$$userEmail'] },
+                        { $eq: ['$creator.userId', '$$userId'] }
+                      ]
+                    }
+                  }
+                }
+              ],
+              as: 'createdLessons'
+            }
+          },
+          {
+            $project: {
+              name: 1,
+              email: 1,
+              role: 1,
+              image: 1,
+              photoURL: 1,
+              totalLessons: { $size: '$createdLessons' }
+            }
+          }
+        ]).toArray();
+
+        res.status(200).json(users);
+      } catch (error) {
+        console.error('Error fetching users:', error);
+        res.status(500).json({ error: 'Failed to fetch users' });
+      }
+    });
+
+    /**
+     * @route   PATCH /admin/users/:id/role
+     * @desc    Update a user's role (e.g., user -> admin)
+     */
+    app.patch('/admin/users/:id/role', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { role } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: 'Invalid User ID' });
+        }
+
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { role } }
+        );
+
+        if (result.modifiedCount === 0) {
+          return res.status(404).json({ error: 'User not found or role unchanged' });
+        }
+
+        res.status(200).json({ success: true, message: 'Role updated successfully' });
+      } catch (error) {
+        console.error('Error updating role:', error);
+        res.status(500).json({ error: 'Failed to update role' });
+      }
+    });
+
+    /**
+     * @route   DELETE /admin/users/:id
+     * @desc    Delete a user account
+     */
+    app.delete('/admin/users/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: 'Invalid User ID' });
+        }
+
+        const result = await usersCollection.deleteOne({ _id: new ObjectId(id) });
+
+        if (result.deletedCount === 0) {
+          return res.status(404).json({ error: 'User not found' });
+        }
+
+        res.status(200).json({ success: true, message: 'User deleted successfully' });
+      } catch (error) {
+        console.error('Error deleting user:', error);
+        res.status(500).json({ error: 'Failed to delete user' });
+      }
+    });
+
+
 
     // ==========================================
     // 💬 COMMENTS ROUTES
