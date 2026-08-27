@@ -5,6 +5,7 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const { jwtVerify, createRemoteJWKSet } = require('jose-cjs');
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -25,6 +26,32 @@ const client = new MongoClient(uri, {
     deprecationErrors: true,
   }
 });
+
+const JWKS = createRemoteJWKSet(
+  new URL(`${process.env.CLIENT_URL}/api/auth/jwks`)
+);
+
+const verifyToken = async (req, res, next) => {
+  const authHeader = req?.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({ message: 'not logged in!' });
+  }
+  const token = authHeader.split(" ")[1];
+  console.log(token);
+  if (!token) {
+    return res.status(401).json({ message: 'not logged in!' });
+  }
+
+  try {
+    const { payload } = await jwtVerify(token, JWKS);
+    console.log(payload);
+    req.user = payload; // Attach decoded JWT payload to request object
+    next();
+  } catch (error) {
+    console.log(error);
+    return res.status(401).json({ message: 'Forbidden!' });
+  }
+};
 
 async function run() {
   try {
@@ -50,9 +77,7 @@ async function run() {
       }
     });
 
-
     // DASHBOARD STATS ENDPOINT
-    // GET /dashboard/stats?email=user@example.com&userId=123
     app.get('/dashboard/stats', async (req, res) => {
       try {
         const { email, userId } = req.query;
@@ -61,12 +86,10 @@ async function run() {
           return res.status(400).json({ error: 'Email or userId query parameter is required' });
         }
 
-        // 1. Count lessons created by this user
         const createdCount = await lessonsCollection.countDocuments({
           'creator.email': email
         });
 
-        // 2. Count lessons SAVED by this user (where favoritedBy array contains userId OR email)
         const savedCount = await lessonsCollection.countDocuments({
           $or: [
             { favoritedBy: email },
@@ -143,7 +166,7 @@ async function run() {
     });
 
     // GET: Single lesson by ID
-    app.get('/dashboard/lessons/:id', async (req, res) => {
+    app.get('/dashboard/lessons/:id', verifyToken, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -160,12 +183,67 @@ async function run() {
       }
     });
 
+    // PATCH: Update Lesson by ID
+    app.patch('/dashboard/lessons/:id', verifyToken, async (req, res) => {
+      try {
+        const { id } = req.params;
+        const userEmail = req.user?.email;
+        const userRole = req.user?.role;
 
-    //////Manage User ///////////////////////
-    /**
- * @route   GET /admin/lessons
- * @desc    Fetch all lessons with filtering & overall admin stats
- */
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: 'Invalid lesson ID format.' });
+        }
+
+        const { title, category, tone, visibility, accessLevel, story, imageUrl } = req.body;
+
+        if (!title || !story) {
+          return res.status(400).json({ error: 'Title and Story fields are required.' });
+        }
+
+        const lesson = await lessonsCollection.findOne({ _id: new ObjectId(id) });
+
+        if (!lesson) {
+          return res.status(404).json({ error: 'Lesson not found.' });
+        }
+
+        const isOwner = lesson.creator?.email === userEmail;
+        const isAdmin = userRole === 'admin';
+
+        if (!isOwner && !isAdmin) {
+          return res.status(403).json({ error: 'Forbidden: You do not have permission to edit this lesson.' });
+        }
+
+        const updateDoc = {
+          $set: {
+            title,
+            category,
+            tone,
+            visibility,
+            accessLevel,
+            story,
+            imageUrl,
+            updatedAt: new Date()
+          }
+        };
+
+        const result = await lessonsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          updateDoc
+        );
+
+        if (result.modifiedCount === 0) {
+          return res.status(200).json({ message: 'No changes were made to the lesson.' });
+        }
+
+        res.status(200).json({ success: true, message: 'Lesson updated successfully!' });
+
+      } catch (error) {
+        console.error('Error updating lesson:', error);
+        res.status(500).json({ error: 'Internal server error while updating lesson.' });
+      }
+    });
+
+    // Admin Route: Fetch all lessons with filtering & stats
     app.get('/admin/lessons', async (req, res) => {
       try {
         const { category, visibility, flagged } = req.query;
@@ -176,7 +254,6 @@ async function run() {
           filter.category = category;
         }
 
-        // Map visibility filter if selected
         if (visibility && visibility !== 'All') {
           if (visibility === 'Public') filter.accessLevel = { $in: ['Public', 'Free', 'free'] };
           else if (visibility === 'Private') filter.accessLevel = { $in: ['Private', 'Premium', 'premium'] };
@@ -189,7 +266,6 @@ async function run() {
 
         const lessons = await lessonsCollection.find(filter).sort({ createdAt: -1 }).toArray();
 
-        // Updated stats queries to include 'Free' and 'Premium' database values
         const publicCount = await lessonsCollection.countDocuments({
           $or: [{ accessLevel: 'Public' }, { accessLevel: 'Free' }, { accessLevel: 'free' }]
         });
@@ -216,10 +292,7 @@ async function run() {
       }
     });
 
-    /**
-     * @route   PATCH /admin/lessons/:id/featured
-     * @desc    Toggle featured status of a lesson
-     */
+    // Admin Route: Toggle featured status
     app.patch('/admin/lessons/:id/featured', async (req, res) => {
       try {
         const { id } = req.params;
@@ -241,10 +314,7 @@ async function run() {
       }
     });
 
-    /**
-     * @route   PATCH /admin/lessons/:id/reviewed
-     * @desc    Mark reported content as reviewed (clears flags)
-     */
+    // Admin Route: Mark reviewed
     app.patch('/admin/lessons/:id/reviewed', async (req, res) => {
       try {
         const { id } = req.params;
@@ -268,10 +338,7 @@ async function run() {
       }
     });
 
-    /**
-     * @route   DELETE /admin/lessons/:id
-     * @desc    Delete an inappropriate lesson
-     */
+    // Admin Route: Delete lesson
     app.delete('/admin/lessons/:id', async (req, res) => {
       try {
         const { id } = req.params;
@@ -292,15 +359,8 @@ async function run() {
         res.status(500).json({ error: 'Failed to delete lesson' });
       }
     });
-    ///////////////manage user///////////////
 
-
-
-    /////////////admin profile//////////////////
-    /**
- * @route   GET /admin/profile
- * @desc    Fetch Admin user details & moderation activity summary
- */
+    // Admin Profile
     app.get('/admin/profile', async (req, res) => {
       try {
         const { email } = req.query;
@@ -315,7 +375,6 @@ async function run() {
           return res.status(404).json({ error: 'Admin user not found' });
         }
 
-        // Optional: Calculate admin activity summary from collections
         const lessonsModeratedCount = await lessonsCollection.countDocuments({ isReviewed: true });
         const totalLessonsCount = await lessonsCollection.countDocuments({});
         const totalUsersCount = await usersCollection.countDocuments({});
@@ -334,10 +393,7 @@ async function run() {
       }
     });
 
-    /**
-     * @route   PATCH /admin/profile/update
-     * @desc    Update Admin profile name and photo URL
-     */
+    // Admin Profile Update
     app.patch('/admin/profile/update', async (req, res) => {
       try {
         const { email, name, photoURL } = req.body;
@@ -370,16 +426,7 @@ async function run() {
       }
     });
 
-
-    /////admin profile////////////
-
-
-
-    ///////////////manage reports//////////////////////
-    /**
- * @route   GET /admin/reported-lessons
- * @desc    Fetch all lessons that have reports or are flagged
- */
+    // Admin: Reported Lessons
     app.get('/admin/reported-lessons', async (req, res) => {
       try {
         const reportedLessons = await lessonsCollection
@@ -400,10 +447,7 @@ async function run() {
       }
     });
 
-    /**
-     * @route   PATCH /admin/reported-lessons/:id/ignore
-     * @desc    Ignore flags and clear all reports for a lesson (keeps lesson live)
-     */
+    // Admin: Ignore Reports
     app.patch('/admin/reported-lessons/:id/ignore', async (req, res) => {
       try {
         const { id } = req.params;
@@ -431,10 +475,7 @@ async function run() {
       }
     });
 
-    /**
-     * @route   DELETE /admin/reported-lessons/:id
-     * @desc    Permanently delete a reported lesson
-     */
+    // Admin: Delete Reported Lesson
     app.delete('/admin/reported-lessons/:id', async (req, res) => {
       try {
         const { id } = req.params;
@@ -456,14 +497,7 @@ async function run() {
       }
     });
 
-
-    /////////manage reports///////////////
-
-
-    /**
- * @route   GET /homepage/top-contributors-week
- * @desc    Fetch Top Contributors of the Week (last 7 days)
- */
+    // Homepage: Top Contributors Week
     app.get('/homepage/top-contributors-week', async (req, res) => {
       try {
         const sevenDaysAgo = new Date();
@@ -495,10 +529,7 @@ async function run() {
       }
     });
 
-    /**
-     * @route   GET /homepage/most-saved-lessons
-     * @desc    Fetch top lessons sorted by favorites count
-     */
+    // Homepage: Most Saved Lessons
     app.get('/homepage/most-saved-lessons', async (req, res) => {
       try {
         const lessons = await lessonsCollection.find({})
@@ -513,24 +544,18 @@ async function run() {
       }
     });
 
-    /**
- * @route   GET /admin/stats
- * @desc    Fetch platform-wide analytics for admin dashboard
- */
+    // Admin: Platform Stats
     app.get('/admin/stats', async (req, res) => {
       try {
-        // 1. Core Platform Counts
         const totalUsers = await usersCollection.countDocuments();
         const totalPublicLessons = await lessonsCollection.countDocuments({
           accessLevel: { $ne: 'Premium' }
         });
 
-        // Lessons flagged by report count or isReported status
         const totalReportedLessons = await lessonsCollection.countDocuments({
           $or: [{ isReported: true }, { reportsCount: { $gt: 0 } }]
         });
 
-        // 2. Today's New Lessons
         const startOfToday = new Date();
         startOfToday.setHours(0, 0, 0, 0);
 
@@ -538,7 +563,6 @@ async function run() {
           createdAt: { $gte: startOfToday.toISOString() }
         });
 
-        // 3. Most Active Contributors (Top 5 users by created lessons)
         const mostActiveContributors = await lessonsCollection.aggregate([
           {
             $group: {
@@ -552,11 +576,10 @@ async function run() {
           { $limit: 5 }
         ]).toArray();
 
-        // 4. Monthly Lesson & User Growth Data (Simulated Aggregation for Charts)
         const lessonGrowth = await lessonsCollection.aggregate([
           {
             $group: {
-              _id: { $substr: ["$createdAt", 0, 7] }, // Group by YYYY-MM
+              _id: { $substr: ["$createdAt", 0, 7] },
               count: { $sum: 1 }
             }
           },
@@ -581,15 +604,11 @@ async function run() {
       }
     });
 
-    /**
- * @route   GET /dashboard/lessons/user/:userId
- * @desc    Fetch all lessons created by a specific user ID or Email
- */
+    // GET: Lessons by User
     app.get('/dashboard/lessons/user/:userId', async (req, res) => {
       try {
         const { userId } = req.params;
 
-        // Search by creator.userId or creator.email in case lessons store either identifier
         const userLessons = await lessonsCollection.find({
           $or: [
             { 'creator.userId': userId },
@@ -604,7 +623,7 @@ async function run() {
       }
     });
 
-    // PATCH: Remove from favorites
+    // PATCH: Remove Favorite
     app.patch('/dashboard/my-favorites/remove', async (req, res) => {
       try {
         const { lessonId, userId } = req.body;
@@ -627,16 +646,13 @@ async function run() {
       }
     });
 
-
-
-
-    // Toggle Featured Status (Admin Route)
+    // Toggle Featured Status
     app.patch('/lessons/:id/featured', async (req, res) => {
       try {
         const { id } = req.params;
-        const { isFeatured } = req.body; // boolean: true or false
+        const { isFeatured } = req.body;
 
-        const result = await db.collection('lessons').updateOne(
+        await db.collection('lessons').updateOne(
           { _id: new ObjectId(id) },
           { $set: { isFeatured: Boolean(isFeatured) } }
         );
@@ -647,7 +663,7 @@ async function run() {
       }
     });
 
-    // Fetch Featured Lessons (Public/Home Route)
+    // GET: Featured Lessons
     app.get('/lessons/featured', async (req, res) => {
       try {
         const featuredLessons = await db
@@ -662,15 +678,7 @@ async function run() {
       }
     });
 
-
-
-
-
-
-    /**
- * @route   GET /admin/users
- * @desc    Fetch all users with their total created lessons count
- */
+    // Admin: Users list
     app.get('/admin/users', async (req, res) => {
       try {
         const users = await usersCollection.aggregate([
@@ -712,10 +720,7 @@ async function run() {
       }
     });
 
-    /**
-     * @route   PATCH /admin/users/:id/role
-     * @desc    Update a user's role (e.g., user -> admin)
-     */
+    // Admin: Update user role
     app.patch('/admin/users/:id/role', async (req, res) => {
       try {
         const { id } = req.params;
@@ -741,10 +746,7 @@ async function run() {
       }
     });
 
-    /**
-     * @route   DELETE /admin/users/:id
-     * @desc    Delete a user account
-     */
+    // Admin: Delete user
     app.delete('/admin/users/:id', async (req, res) => {
       try {
         const { id } = req.params;
@@ -766,16 +768,7 @@ async function run() {
       }
     });
 
-
-
-    // ==========================================
-    // 💬 COMMENTS ROUTES
-    // ==========================================
-
-    /**
-     * @route   POST /dashboard/lessons/:id/comments
-     * @desc    Add a comment to a lesson
-     */
+    // POST: Add Comment
     app.post('/dashboard/lessons/:id/comments', async (req, res) => {
       try {
         const { id } = req.params;
@@ -802,7 +795,6 @@ async function run() {
           }
         );
 
-        // Explicitly return the newComment object inside response
         res.status(201).json({ success: true, comment: newComment });
       } catch (error) {
         console.error('Error adding comment:', error);
@@ -810,10 +802,7 @@ async function run() {
       }
     });
 
-    /**
- * @route   POST /dashboard/lessons/:id/report
- * @desc    Report a lesson and increment total report count
- */
+    // POST: Report Lesson
     app.post('/dashboard/lessons/:id/report', async (req, res) => {
       try {
         const { id } = req.params;
@@ -831,7 +820,6 @@ async function run() {
           createdAt: new Date().toISOString()
         };
 
-        // Store individual report AND increment overall reportsCount counter
         await lessonsCollection.updateOne(
           { _id: new ObjectId(id) },
           {
@@ -848,10 +836,7 @@ async function run() {
       }
     });
 
-    /**
-     * @route   GET /dashboard/lessons/:id/comments
-     * @desc    Get all comments for a specific lesson
-     */
+    // GET: Lesson Comments
     app.get('/dashboard/lessons/:id/comments', async (req, res) => {
       try {
         const { id } = req.params;
@@ -871,14 +856,7 @@ async function run() {
       }
     });
 
-    // ==========================================
-    // 👍 LIKES ROUTES
-    // ==========================================
-
-    /**
-     * @route   PATCH /dashboard/lessons/:id/like
-     * @desc    Toggle like status (Like / Unlike) on a lesson
-     */
+    // PATCH: Toggle Like
     app.patch('/dashboard/lessons/:id/like', async (req, res) => {
       try {
         const { id } = req.params;
@@ -913,7 +891,7 @@ async function run() {
       }
     });
 
-    // POST: Create New Lesson
+    // POST: Create Lesson
     app.post('/dashboard/lessons', async (req, res) => {
       try {
         const lessonData = req.body;
@@ -939,7 +917,7 @@ async function run() {
       }
     });
 
-    // PATCH: Favorite Toggle Endpoint
+    // PATCH: Toggle Favorite
     app.patch('/dashboard/lessons/:id/favorite', async (req, res) => {
       try {
         const { id } = req.params;
